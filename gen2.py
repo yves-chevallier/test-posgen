@@ -28,11 +28,15 @@ class SCurvePlanner:
     _dir: float = field(default=1.0, init=False)
     _finished: bool = field(default=True, init=False)
 
+    _pos_int: int = field(default=0, init=False)     # position discrète (inc)
+    _frac:    float = field(default=0.0, init=False) # éventuelle accumulation
+
     def plan(self, distance: int) -> None:
-        """ Distance is given in increments, thus this is an integer. """
-        self._dir = 1.0 if distance >= 0.0 else -1.0
+        self._dir = 1.0 if distance >= 0 else -1.0
         self._target = abs(distance)
         self.position = self.velocity = self.acceleration = self.current_time = 0.0
+        self._pos_int = 0
+        self._frac = 0.0
         self._finished = False
 
     def step(self) -> Tuple[float, float, float]:
@@ -79,14 +83,16 @@ class SCurvePlanner:
         self.velocity      = v1
         self.acceleration  = a_cmd
 
+        # 2. projection sur la grille d'incréments -------------------------
+        p_int   = int(round(self._dir * self.position))   # position discrète visée
+        dp      = p_int - self._pos_int                   # déplacement à effectuer
+        self._pos_int = p_int                             # mémorise pour l'itération suivante
+
+        # 3. test de fin (inchangé) ----------------------------------------
         if self.position >= self._target - EPS and self.velocity <= d_max * dt:
             self._finish()
 
-        return (
-            self._dir * self.position,
-            self._dir * self.velocity,
-            self._dir * self.acceleration,
-        )
+        return dp, self._dir * self.velocity, self._dir * self.acceleration
 
 
     @property
@@ -110,10 +116,11 @@ time_axis, pos, vel, acc = [], [], [], []
 dx = 0.0
 p_prev = 0.0
 pp = 0.0
-
+p = 0
 count = 10000
 while count > 0 and not planner.is_finished:
-    p, v, a = planner.step()
+    dp, v, a = planner.step()
+    p += dp
     time_axis.append(planner.current_time)
     dx = p - p_prev
     p_prev = p
