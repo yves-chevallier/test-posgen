@@ -57,28 +57,30 @@ class SCurvePlanner:
             self._finish()
             return self._dir * self.position, 0.0, 0.0
 
-        # -------- 1.  critère de décélération anticipée --------
+        # 1. critère de freinage identique
         s_stop = v0 * dt + v0 * v0 / (2.0 * d_max)
-        if s_stop >= remaining - EPS:           # on doit freiner
+        if s_stop >= remaining - EPS:
             a_cmd = -d_max
-        elif v0 < vmax - EPS:                   # on peut encore accélérer
+        elif v0 < vmax - EPS:
             a_cmd = min(a_max, (vmax - v0) / dt)
-        else:                                   # palier
+        else:
             a_cmd = 0.0
 
-        # -------- 2.  intégration cinématique --------
+        # 2. vitesse finale réellement atteignable
         v1    = clamp(v0 + a_cmd * dt, 0.0, vmax)
         a_cmd = clamp((v1 - v0) / dt, -d_max, a_max)
-        dx    = int(v0 * dt + 0.5 * a_cmd * dt * dt)
 
-        # -------- 3.  sûreté terminale --------
-        if dx > remaining:
-            dx = remaining
-            v1   = max(0.0, 2.0 * dx / dt - v0)          # continuité énergétique
+        # 3. déplacement cohérent (trapèze)
+        dx_f  = 0.5 * (v0 + v1) * dt
+
+        # 4. sûreté terminale
+        if dx_f > remaining:
+            dx_f = remaining
+            v1   = max(0.0, 2.0 * dx_f / dt - v0)
             a_cmd = clamp((v1 - v0) / dt, -d_max, a_max)
 
-        # -------- 4.  mise à jour d’état --------
-        self.position     += dx
+        # 5. mise à jour d’état (inchangé)
+        self.position     += dx_f
         self.current_time += dt
         self.velocity      = v1
         self.acceleration  = a_cmd
@@ -104,29 +106,58 @@ class SCurvePlanner:
         self.velocity = self.acceleration = 0.0
         self._finished = True
 
+class JerkFilter:
+    def __init__(self, dt: float):
+        self.dt = dt
+        self.alpha = 0.0
+        self.reset()
 
-planner = SCurvePlanner(    time_step=200e-6,
-    max_velocity=100000,
-    max_acceleration=16000000,
-    max_deceleration=16000000)
+    def reset(self):
+        self.err = 0.0 # reliquat signé
+        self.y_old = 0.0
+
+    def set_tau(self, tau = 10e-3):
+        self.alpha = self.dt / tau if tau > 0.0 else 0.0
+
+    def update(self, sample: int):
+        if self.alpha == 0.0: return (sample, sample)
+
+        x_eff = sample + self.err # restitution du résidu
+        y = self.y_old + self.alpha * (x_eff - self.y_old)
+        self.y_old = y
+        iy = int(round(y))  # quantification entière
+        self.err = y - iy # nouveau résidu
+        return (iy, y)
+
+dt = 200e-6
+
+planner = SCurvePlanner(    time_step=dt,
+    max_velocity=1000,
+    max_acceleration=1600,
+    max_deceleration=1600)
 planner.plan(1000)
 
-time_axis, pos, vel, acc = [], [], [], []
+jf = JerkFilter(dt)
+jf.set_tau(1e-3)
+
+time_axis, pos, posj, vel, acc, dps = [], [], [], [], [], []
 
 dx = 0.0
 p_prev = 0.0
 pp = 0.0
 p = 0
+pj = 0
 count = 10000
+
 while count > 0 and not planner.is_finished:
     dp, v, a = planner.step()
     p += dp
-    time_axis.append(planner.current_time)
-    dx = p - p_prev
-    p_prev = p
-    pp += dx
+    pj += jf.update(dp)
 
-    pos.append(pp)
+    time_axis.append(planner.current_time)
+    pos.append(p)
+    posj.append(pj)
+    dps.append(dp)
     vel.append(v)
     acc.append(a)
 
@@ -134,18 +165,31 @@ while count > 0 and not planner.is_finished:
         count -= 1
 
 pos = np.array(pos)
+posj = np.array(posj)
 vel = np.array(vel)
 acc = np.array(acc)
 
+# Diff np.diff même taille que pos
+v = np.diff(posj, prepend=pos[0]) / dt
+a = np.diff(v, prepend=vel[0]) / dt
+
+vv = np.diff(pos, prepend=pos[0]) / dt
+aa = np.diff(vv, prepend=vel[0]) / dt
+
 # Plot results
 fig, axes = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
-axes[0].plot(time_axis, pos, marker="o", markerfacecolor='none', label="Position")
+axes[0].plot(time_axis, pos,  markerfacecolor='none', label="Position")
+axes[0].plot(time_axis, posj,  markerfacecolor='none', label="Position")
 axes[0].set_ylabel("Position [rev]")
 
-axes[1].plot(time_axis, vel, marker="o", markerfacecolor='none')
+axes[1].plot(time_axis, vel,  markerfacecolor='none')
+axes[1].plot(time_axis, v,  markerfacecolor='none')
+axes[1].plot(time_axis, np.array(dps)/dt,  markerfacecolor='none', label="Position (inc)")
 axes[1].set_ylabel("Velocity [rev/s]")
 
-axes[2].plot(time_axis, acc, marker="o", markerfacecolor='none')
+axes[2].plot(time_axis, acc,  markerfacecolor='none')
+axes[2].plot(time_axis, a,  markerfacecolor='none')
+axes[2].plot(time_axis, aa,  markerfacecolor='none')
 axes[2].set_ylabel("Acceleration [rev/s²]")
 axes[2].set_xlabel("Time [s]")
 
