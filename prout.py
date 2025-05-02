@@ -1,254 +1,180 @@
-"""
-Refined seven‑phase S‑curve trajectory generator.
+"""Bang‑bang trajectory generator with analytical deceleration criterion
+===================================================================
 
-Key update
+This planner drives a single‑axis motion using three constant acceleration
+levels:
+
+* **+A_nom** – accelerate until either the nominal velocity is reached or the
+  braking criterion is triggered.
+* **0**      – hold the nominal velocity when there is still sufficient
+  distance left to decelerate safely.
+* **−D_nom** – decelerate as soon as the analytical braking distance exceeds
+  the remaining distance to the target.
+
+The braking distance is computed with the work–energy relationship
+\(s_\text{stop} = v^2 / (2·D_\text{nom})\), guaranteeing an exact stop on the
+command position, independent of the fixed integration step. Jerk is not part
+of the kinematic integration; it is only computed (and optionally filtered) for
+feed‑forward or monitoring purposes.
+
+Public API
 ----------
-* **Variable sub‑step integration** – the integrator now shortens the very last
-  step so that the numerical timeline lands *exactly* on the analytical end
-  of the profile. Consequently, the final sample is now continuous with the
-  penultimate one; the spurious jump that was visible at the end of the
-  position/velocity curves disappears.
+* ``plan(distance: float)`` – initialise a new move.
+* ``step() -> tuple[float, float, float, float]`` – advance the simulation by
+  ``time_step`` seconds and return *(position, velocity, acceleration, jerk)*.
+* ``is_finished`` – ``True`` when the motion is complete.
 
-All physical units remain coherent (e.g. revolutions, rev/s, rev/s², rev/s³).
+All physical units are coherent (revolution, rev/s, rev/s², rev/s³).
 """
-from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import Tuple
 
 import matplotlib.pyplot as plt
+
+EPS = 1e-12  # numerical guard
+
+
+def _clamp(x: float, low: float, high: float) -> float:
+    """Return *x* limited to the interval [low, high]."""
+    return max(low, min(high, x))
 
 
 @dataclass
 class SCurvePlanner:
-    """Seven‑phase S‑curve trajectory generator (refined version)."""
+    """Bang‑bang motion planner with an analytical deceleration criterion."""
 
-    # Public parameters
-    time_step: float
-    max_velocity: float = 0.0
-    max_acceleration: float = 0.0
-    max_deceleration: float = 0.0
-    jerk_time_ms: float = 0.0
+    # User‑configurable parameters
+    time_step: float                     # integration step [s]
+    max_velocity: float = 0.0            # nominal velocity [rev/s]
+    max_acceleration: float = 0.0        # accelerating slope [rev/s²]
+    max_deceleration: float = 0.0        # braking slope (positive) [rev/s²]
 
-    # Dynamic state
-    position: float = 0.0  # rev
-    velocity: float = 0.0  # rev/s
-    acceleration: float = 0.0  # rev/s²
-    jerk: float = 0.0  # rev/s³
-    current_time: float = 0.0  # s
+    jerk_filter_alpha: float = 1.0       # 1 → no filtering, 0 → heavy smoothing
 
-    # Internal scheduling
-    _jerk_duration: float = 0.0  # s
-    _jerk_acc: float = 0.0
-    _jerk_dec: float = 0.0
-    _phase_end_times: List[float] = field(default_factory=list)
+    # Public state variables (read‑only for the caller)
+    position: float = 0.0                # [rev]
+    velocity: float = 0.0                # [rev/s]
+    acceleration: float = 0.0            # [rev/s²]
+    jerk: float = 0.0                    # filtered jerk [rev/s³]
+    current_time: float = 0.0            # [s]
+
+    # Internal fields
+    _target_distance: float = 0.0        # always non‑negative [rev]
+    _direction: float = 1.0              # +1 or −1 depending on commanded sign
     _finished: bool = True
-    _target_distance: float = 0.0
 
-    # ---------------------------------------------------------------------
-    # Public parameter setters (unchanged)
-    # ---------------------------------------------------------------------
-    def set_max_velocity(self, value: float) -> None:
-        self.max_velocity = float(value)
+    _jerk_raw_prev: float = 0.0          # previous unfiltered jerk
 
-    def set_max_acceleration(self, value: float) -> None:
-        self.max_acceleration = float(value)
-        if self._jerk_duration:
-            self._jerk_acc = self.max_acceleration / self._jerk_duration
-
-    def set_max_deceleration(self, value: float) -> None:
-        self.max_deceleration = float(value)
-        if self._jerk_duration:
-            self._jerk_dec = self.max_deceleration / self._jerk_duration
-
-    def set_jerk_time(self, time_ms: float) -> None:
-        """Set the jerk transition time (0 → *Amax*)."""
-        self.jerk_time_ms = float(time_ms)
-        self._jerk_duration = self.jerk_time_ms / 1000.0  # convert to s
-        if self.max_acceleration:
-            self._jerk_acc = self.max_acceleration / self._jerk_duration
-        if self.max_deceleration:
-            self._jerk_dec = self.max_deceleration / self._jerk_duration
-
-    # ---------------------------------------------------------------------
-    # Trajectory planning (unchanged)
-    # ---------------------------------------------------------------------
     def plan(self, distance: float) -> None:
-        """Prepare an S‑curve profile to move *distance* revolutions."""
-        # Sanity checks
-        if any(v <= 0 for v in (
+        """Initialise a new point‑to‑point move of *distance* revolutions."""
+        if any(p <= 0 for p in (
             self.time_step,
             self.max_velocity,
             self.max_acceleration,
             self.max_deceleration,
-            self._jerk_duration,
         )):
-            raise ValueError("Every dynamic parameter must be strictly positive.")
+            raise ValueError("All dynamic parameters must be strictly positive.")
 
-        v_cruise = self.max_velocity
-        a_max = self.max_acceleration
-        d_max = self.max_deceleration
-        t_j = self._jerk_duration
-        j_acc = self._jerk_acc
-        j_dec = self._jerk_dec
-        total_distance = abs(float(distance))
-
-        # Helper to compute the distance travelled during a jerk‑limited
-        # acceleration phase that ends at *a_max* and lasts *t_lin* at
-        # constant acceleration (may be zero).
-        def _s_curve_distance(a_limit: float, jerk: float, t_lin: float) -> float:
-            t_jrk = a_limit / jerk
-            d_jerk = (1.0 / 6.0) * jerk * t_jrk ** 3
-            v_jerk = 0.5 * jerk * t_jrk ** 2
-            d_lin = v_jerk * t_lin + 0.5 * a_limit * t_lin ** 2
-            return 2.0 * d_jerk + d_lin
-
-        # Nominal acceleration/deceleration durations without cruising
-        t_acc_total = v_cruise / a_max
-        t_dec_total = v_cruise / d_max
-
-        t_acc_lin = max(t_acc_total - 2.0 * t_j, 0.0)
-        t_dec_lin = max(t_dec_total - 2.0 * t_j, 0.0)
-
-        # Distance for acceleration and deceleration segments
-        distance_acc = _s_curve_distance(a_max, j_acc, t_acc_lin)
-        distance_dec = _s_curve_distance(d_max, j_dec, t_dec_lin)
-        distance_cruise = total_distance - (distance_acc + distance_dec)
-
-        # If the distance is too short to reach *v_cruise*, compute the
-        # admissible peak velocity analytically (symmetric case only).
-        if distance_cruise < 0.0:
-            if abs(a_max - d_max) < 1e-9:  # symmetric profile
-                a_lim = a_max
-                j_lim = j_acc
-                c_term = (1.0 / 3.0) * a_lim * t_j ** 2
-                # quadratic: a*u² + a*t_j*u + (2c - D) = 0
-                a_q = a_lim
-                b_q = a_lim * t_j
-                c_q = 2.0 * c_term - total_distance
-                disc = b_q ** 2 - 4.0 * a_q * c_q
-                if disc < 0:
-                    raise RuntimeError("Incompatible parameters for the given distance.")
-                t_lin_new = (-b_q + math.sqrt(disc)) / (2.0 * a_q)
-                v_cruise = a_lim * (t_j + t_lin_new)
-                t_acc_lin = t_dec_lin = t_lin_new
-                distance_cruise = 0.0
-                distance_acc = distance_dec = _s_curve_distance(a_lim, j_lim, t_lin_new)
-            else:
-                raise RuntimeError(
-                    "Asymmetric Amax/Dmax with insufficient distance is not handled."
-                )
-
-        t1 = t_j
-        t2 = t1 + t_acc_lin
-        t3 = t2 + t_j
-        t4 = t3 + distance_cruise / v_cruise
-        t5 = t4 + t_j
-        t6 = t5 + t_dec_lin
-        t7 = t6 + t_j
-        self._phase_end_times = [t1, t2, t3, t4, t5, t6, t7]
-
-        self.max_velocity = v_cruise  # may have been reduced above
-        self._finished = False
-        self._target_distance = total_distance
+        self._direction = 1.0 if distance >= 0 else -1.0
+        self._target_distance = abs(distance)
 
         # Reset dynamic state
         self.position = 0.0
         self.velocity = 0.0
         self.acceleration = 0.0
         self.jerk = 0.0
+        self._jerk_raw_prev = 0.0
         self.current_time = 0.0
+        self._finished = False
 
-    # ---------------------------------------------------------------------
-    # *Fixed* integration routine
-    # ---------------------------------------------------------------------
     def step(self) -> Tuple[float, float, float, float]:
-        """Advance the profile by one (possibly shortened) time step.
-
-        The integrator now adapts the very last step so that *current_time*
-        coincides exactly with the theoretical end time, thereby removing the
-        discontinuity that used to appear at the final sample.
-        """
+        """Advance the simulation by ``time_step`` seconds."""
         if self._finished:
-            return self.position, 0.0, 0.0, 0.0
+            return self.position * self._direction, 0.0, 0.0, 0.0
 
-        final_time = self._phase_end_times[-1]
-        # Use a shortened sub‑step when approaching the end of the profile.
-        dt = self.time_step if self.current_time + self.time_step < final_time else final_time - self.current_time
+        dt = self.time_step
 
-        # Guard against numerical artefacts (can happen when dt ≈ 0).
-        if dt <= 0.0:
-            self.position = self._target_distance
-            self.velocity = self.acceleration = self.jerk = 0.0
-            self.current_time = final_time
-            self._finished = True
-            return self.position, 0.0, 0.0, 0.0
+        # Remaining distance (always non‑negative)
+        s_rem = self._target_distance - self.position
+        if s_rem <= EPS and self.velocity <= EPS:
+            self._finalise()
+            return self.position * self._direction, 0.0, 0.0, 0.0
 
-        # Determine current phase (based on the time *before* integration).
-        phase = next(
-            (idx for idx, t_end in enumerate(self._phase_end_times) if self.current_time < t_end),
-            7,
-        )
+        v = self.velocity
+        a_nom = self.max_acceleration
+        d_nom = self.max_deceleration
+        v_nom = self.max_velocity
 
-        # Phase‑dependent jerk
-        if phase == 0:
-            self.jerk = self._jerk_acc
-        elif phase == 1:
-            self.jerk = 0.0
-        elif phase == 2:
-            self.jerk = -self._jerk_acc
-        elif phase == 3:
-            self.jerk = 0.0
-        elif phase == 4:
-            self.jerk = -self._jerk_dec
-        elif phase == 5:
-            self.jerk = 0.0
-        elif phase == 6:
-            self.jerk = self._jerk_dec
+        # Analytical braking distance with constant −D_nom
+        s_stop = v * v / (2.0 * d_nom)
 
-        # Discrete integration (now using the possibly shortened *dt*)
-        self.acceleration += self.jerk * dt
-        self.velocity += self.acceleration * dt + 0.5 * self.jerk * dt ** 2
-        self.position += (
-            self.velocity * dt
-            + 0.5 * self.acceleration * dt ** 2
-            + (1.0 / 6.0) * self.jerk * dt ** 3
-        )
+        # Acceleration command selection
+        if s_stop >= s_rem - EPS:                 # braking phase
+            a_cmd = -d_nom
+        elif v < v_nom - EPS:                    # accelerating phase
+            a_cmd = a_nom
+            if v + a_cmd * dt > v_nom:           # avoid overshoot of V_nom
+                a_cmd = (v_nom - v) / dt
+        else:                                    # cruise phase
+            a_cmd = 0.0
+
+        # Kinematic integration
+        v_new = v + a_cmd * dt
+        v_new = _clamp(v_new, 0.0, v_nom)
+        a_cmd = (v_new - v) / dt  # recompute if clamped
+
+        self.position += v * dt + 0.5 * a_cmd * dt * dt
+        prev_acc = self.acceleration
+        self.velocity = v_new
+        self.acceleration = a_cmd
+
+        # Jerk calculation with optional low‑pass filter
+        jerk_raw = (a_cmd - prev_acc) / dt
+        alpha = self.jerk_filter_alpha
+        self.jerk = alpha * jerk_raw + (1.0 - alpha) * self.jerk
+        self._jerk_raw_prev = jerk_raw
+
         self.current_time += dt
 
-        # Exact termination condition
-        if math.isclose(self.current_time, final_time, abs_tol=1e-12):
-            self.position = self._target_distance
-            self.velocity = self.acceleration = self.jerk = 0.0
-            self._finished = True
+        # Finalise when the target is reached and residual velocity is low
+        if self.position >= self._target_distance - EPS and v_new <= d_nom * dt:
+            self._finalise()
 
-        return self.position, self.velocity, self.acceleration, self.jerk
+        return (
+            self.position * self._direction,
+            self.velocity * self._direction,
+            self.acceleration * self._direction,
+            self.jerk * self._direction,
+        )
 
-    # ------------------------------------------------------------------
-    # Read‑only helper
-    # ------------------------------------------------------------------
+    def _finalise(self) -> None:
+        """Clamp the final sample exactly on the command position."""
+        self.position = self._target_distance
+        self.velocity = 0.0
+        self.acceleration = 0.0
+        self.jerk = 0.0
+        self._finished = True
+
     @property
-    def is_finished(self) -> bool:  # noqa: D401
-        """Return *True* when the profile has completed."""
+    def is_finished(self) -> bool:  # noqa: D401 – property not a method
+        """Return ``True`` when the move has completed."""
         return self._finished
 
 
-# -------------------------------------------------------------------------
-# Example (kept for completeness – behaviour is now continuous)
-# -------------------------------------------------------------------------
 if __name__ == "__main__":
-    TIME_STEP = 200e-6  # 200 µs
-    planner = SCurvePlanner(time_step=TIME_STEP)
-    planner.set_max_velocity(10.0)      # rev/s
-    planner.set_max_acceleration(10.0)  # rev/s²
-    planner.set_max_deceleration(10.0)  # rev/s²
-    planner.set_jerk_time(50.0)         # 1 ms
-    planner.plan(100.0)                 # 100 revolutions
+    dt = 200e-6  # 200 µs integration step
+    planner = SCurvePlanner(
+        time_step=dt,
+        max_velocity=10.0,
+        max_acceleration=10.0,
+        max_deceleration=10.0,
+        jerk_filter_alpha=0.01,  # 20 % raw jerk, 80 % previous value
+    )
+    planner.plan(100.0)  # target: 100 revolutions
 
-    t_axis: List[float] = []
-    pos, vel, acc, jrk = [], [], [], []
-
+    t_axis, pos, vel, acc, jrk = [], [], [], [], []
     while not planner.is_finished:
         x, v, a, j = planner.step()
         t_axis.append(planner.current_time)
