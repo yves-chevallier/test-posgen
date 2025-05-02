@@ -3,6 +3,7 @@
 #include "conversion.hpp"
 
 #include <cmath>
+#include <iostream>
 
 #ifndef INT64_MAX
 #    define INT64_MAX   0x7fffffffffffffffLL
@@ -28,6 +29,7 @@ void PositionGenerator::move(int64_t pos, float velocity, float acceleration,
 }
 
 void PositionGenerator::move(int64_t pos) {
+    std::cout << "Move pos: " << pos << std::endl;
     finished = false;
     profileVelNorm =
         clamp<int64_t>(float2inc(context.velocity * dt), 1, INT64_MAX);
@@ -49,6 +51,12 @@ void PositionGenerator::move(int64_t pos) {
     if(remaining < positionToIn(1.f)){
         remaining = 0;
     }
+    std::cout << "Remaining: " << remaining << std::endl;
+    std::cout << "Sign: " << sign << std::endl;
+    std::cout << "Velocity: " << velocity << std::endl;
+    std::cout << "Profile velocity: " << profileVelNorm << std::endl;
+    std::cout << "Profile acceleration: " << profileAccNorm << std::endl;
+    std::cout << "Profile deceleration: " << profileDecNorm << std::endl;
 }
 
 void PositionGenerator::moveAbsolute(int64_t pos, int64_t posActual, float velocity,
@@ -73,6 +81,7 @@ int64_t PositionGenerator::update() {
             remainingPost = 0;
             sign = -sign;
         }
+        std::cout << "Finished" << std::endl;
         return 0;
     }
     tmp = velocity + profileAccNorm;

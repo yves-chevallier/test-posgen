@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 gen = positiongen.PositionGenerator()
 gen.init(50e-6 * 4)  # par exemple, 1 ms
 
-gen.move(-30000, 400.0, 5000.0, 5000.0)
+gen.move(30000 * 2**32, 0.400, 5000.0, 5000.0)
 
 positions = []
 pos = 0

@@ -1,10 +1,10 @@
 #include "positionGeneratorDouble.hpp"
 
-void PositionGenerator::init(double dt) {
+void PositionGeneratorDouble::init(double dt) {
     this->dt = dt;
 }
 
-void PositionGenerator::move(int64_t targetPosQ32_32, double velocity, double acceleration, double deceleration) {
+void PositionGeneratorDouble::move(int64_t targetPosQ32_32, double velocity, double acceleration, double deceleration) {
     v_max = velocity;
     a_max = acceleration;
     d_max = deceleration;
@@ -16,12 +16,12 @@ void PositionGenerator::move(int64_t targetPosQ32_32, double velocity, double ac
     finished = false;
 }
 
-void PositionGenerator::moveAbsolute(int64_t targetQ32_32, int64_t currentQ32_32) {
+void PositionGeneratorDouble::moveAbsolute(int64_t targetQ32_32, int64_t currentQ32_32) {
     int64_t delta = targetQ32_32 - currentQ32_32;
     move(delta, v_max, a_max, d_max);
 }
 
-int64_t PositionGenerator::update() {
+int64_t PositionGeneratorDouble::update() {
     if (finished)
         return 0;
 
@@ -51,17 +51,17 @@ int64_t PositionGenerator::update() {
     return static_cast<int64_t>(stepQ32 + 0.5) * sign;
 }
 
-bool PositionGenerator::targetReached() const {
+bool PositionGeneratorDouble::targetReached() const {
     return finished;
 }
 
-void PositionGenerator::reset() {
+void PositionGeneratorDouble::reset() {
     remaining = 0;
     velocity = 0;
     finished = true;
     sign = 1;
 }
 
-void PositionGenerator::stop() {
+void PositionGeneratorDouble::stop() {
     move(0, v_max, a_max, d_max);
 }

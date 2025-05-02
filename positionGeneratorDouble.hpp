@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <cmath>
 
-class PositionGenerator {
+class PositionGeneratorDouble {
 public:
     void init(double dt);
     void move(int64_t targetPosQ32_32, double velocity, double acceleration, double deceleration);
