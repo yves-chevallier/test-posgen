@@ -7,6 +7,7 @@ name = "positiongen"
 version = "0.1.0"
 requires-python = ">=3.8"
 dependencies = [
+    "ipykernel>=6.29.5",
     "matplotlib>=3.7.5",
 ]
 
