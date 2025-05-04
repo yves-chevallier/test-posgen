@@ -137,8 +137,8 @@ private:
             dx = sample;
             jerk_done = true;
         }
-        velocity_current = dx;
-        acceleration_current = dx - dx_old;
+        velocity_current = dx * movement_sign;
+        acceleration_current = (dx - dx_old) * movement_sign;
         dx_old = dx;
     }
 };

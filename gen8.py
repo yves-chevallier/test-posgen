@@ -7,10 +7,10 @@ dt = 200e-6
 planner = SCurvePlanner(dt=dt)
 
 context = ContextScurvePlanner(
-    velocityLimit=1,
-    acceleration=100,
-    deceleration=100,
-    jerk_time=1e-3
+    velocityLimit=1000,
+    acceleration=50000,
+    deceleration=50000,
+    jerk_time=0
 )
 
 planner.set_context(context)
@@ -22,9 +22,27 @@ posi = []
 
 planner.start()
 
+class Distretizer:
+    """ Convert a float to an int with a residual error """
+    def __init__(self):
+        self._err = 0.0
+
+    def step(self, sample):
+        """ Convert a float to an int with a residual error """
+        x = round(sample)
+        self._err += sample - x
+
+        if abs(self._err) >= 1.0:
+            ierr = round(self._err)
+            x += ierr
+            self._err -= ierr
+
+        print(sample, x, self._err)
+        return x
+
 distretizer = Distretizer()
 
-
+pz = 0
 while not planner.finished():
     v, a = planner.step()
 
@@ -32,11 +50,13 @@ while not planner.finished():
     p += v
     t += dt
 
+    pz += distretizer.step(v)
+
     time.append(t)
     pos.append(p)
-    posi.append(distretizer.step(p))
-    vel.append(v)
-    acc.append(a)
+    posi.append(pz)
+    vel.append(v / dt)
+    acc.append(a / dt / dt)
 
 fig, axes = plt.subplots(3, 1, figsize=(12, 7), sharex=True)
 kwargs = { 'marker': '.' } if len(time) < 500 else {}

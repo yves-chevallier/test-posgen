@@ -13,7 +13,6 @@ class SCurvePlanner:
 
     def __init__(self, dt: float):
         self.dt = dt
-        self.sign = 1.0
 
         self.x = 0.0
         self.acc = 0
@@ -36,9 +35,9 @@ class SCurvePlanner:
 
     def apply_context(self):
         """ Apply context to the planner """
-        self.acc = self.ctx.acceleration * self.dt
-        self.dec = self.ctx.deceleration * self.dt
-        self.vmax = self.ctx.velocityLimit
+        self.acc = self.ctx.acceleration * self.dt * self.dt
+        self.dec = self.ctx.deceleration * self.dt * self.dt
+        self.vmax = self.ctx.velocityLimit * self.dt
         self.alpha = self.dt / self.ctx.jerk_time if self.ctx.jerk_time > 0.0 else 0.0
 
     def set_distance(self, value):
@@ -124,7 +123,7 @@ class SCurvePlanner:
             self._jerk_done = True
             dx = sample
 
-        ret = (dx, dx - self._dx_old)
+        ret = (dx * self._sign, (dx - self._dx_old) * self._sign)
         self._dx_old = dx
         return ret
 
@@ -143,4 +142,5 @@ class Distretizer:
             x += ierr
             self._err -= ierr
 
+        print(sample, x)
         return x
