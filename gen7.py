@@ -3,11 +3,10 @@ from math import sqrt
 
 @dataclass(slots=True)
 class ContextScurvePlanner:
-
-    vmax: float  = field(default=0.0, init=False)
-    acc: float  = field(default=0.0, init=False)
-    dec: float  = field(default=0.0, init=False)
-    jerk: float = field(default=0.0, init=False)
+    velocityLimit: float
+    acceleration: float
+    deceleration: float
+    jerk_time: float
 
 class SCurvePlanner:
     """ Generate smooth S-Curve movement profile """
@@ -31,21 +30,16 @@ class SCurvePlanner:
         self._finished = True
         self._jerk_done = False
 
-    def set_acceleration(self, value):
-        """ Set acceleration in pu/s² """
-        self.acc = value * self.dt
+    def set_context(self, ctx: ContextScurvePlanner):
+        """ Set the context for the planner """
+        self.ctx = ctx
 
-    def set_deceleration(self, value):
-        """ Set deceleration in pu/s² """
-        self.dec = value * self.dt
-
-    def set_velocity(self, value):
-        """ Set max velocity in pu/s """
-        self.vmax = value
-
-    def set_jerk(self, tau: float):
-        """ Set jerk in seconds """
-        self.alpha = self.dt / tau if tau > 0.0 else 0.0
+    def apply_context(self):
+        """ Apply context to the planner """
+        self.acc = self.ctx.acceleration * self.dt
+        self.dec = self.ctx.deceleration * self.dt
+        self.vmax = self.ctx.velocityLimit
+        self.alpha = self.dt / self.ctx.jerk_time if self.ctx.jerk_time > 0.0 else 0.0
 
     def set_distance(self, value):
         """ Set distance to travel in pu """
@@ -66,6 +60,8 @@ class SCurvePlanner:
         self._finished = False
         self._breaking = False
         self._jerk_done = False
+
+        self.apply_context()
         return True
 
     def finished(self) -> bool:
@@ -118,10 +114,12 @@ class SCurvePlanner:
         return self.apply_jerk(self.v)
 
     def apply_jerk(self, sample):
-
+        """ Jerk is a simple first order low-pass filter.
+        Do we really need more than that?
+        """
         if self.alpha > 0.0:
             dx = self._dx_old + self.alpha * (sample - self._dx_old)
-            self._jerk_done = abs(dx - self._dx_old) < 1e-3
+            self._jerk_done = abs(dx - self._dx_old) < 1e-6
         else:
             self._jerk_done = True
             dx = sample
@@ -130,7 +128,6 @@ class SCurvePlanner:
         self._dx_old = dx
         return ret
 
-
 class Distretizer:
     """ Convert a float to an int with a residual error """
     def __init__(self):
@@ -138,28 +135,31 @@ class Distretizer:
 
     def step(self, sample):
         """ Convert a float to an int with a residual error """
-        x = int(sample)
+        x = round(sample)
         self._err += sample - x
 
         if abs(self._err) >= 1.0:
-            ierr = int(self._err)
+            ierr = round(self._err)
             x += ierr
             self._err -= ierr
 
         return x
 
-import numpy as np
 import matplotlib.pyplot as plt
 
 dt = 200e-6
 
 planner = SCurvePlanner(dt=dt)
-planner.set_velocity(20)
-planner.set_acceleration(1000)
-planner.set_deceleration(1000)
-planner.set_jerk(2e-3)
 
-planner.set_distance(10000)
+context = ContextScurvePlanner(
+    velocityLimit=1,
+    acceleration=100,
+    deceleration=100,
+    jerk_time=1e-3
+)
+
+planner.set_context(context)
+planner.set_distance(10)
 
 p = t = 0
 time, pos, vel, acc = [], [], [], []
@@ -184,33 +184,28 @@ while not planner.finished():
     acc.append(a)
 
 fig, axes = plt.subplots(3, 1, figsize=(12, 7), sharex=True)
-axes[0].plot(time, pos, label="Position", marker='.')
-axes[0].plot(time, posi, label="Position", marker='.')
-axes[0].set_ylabel("Position [rev]")
+kwargs = { 'marker': '.' } if len(time) < 500 else {}
 
-axes[1].plot(time, vel, marker='.')
-axes[1].set_ylabel("Velocity [rev/s]")
+if (len(time) > 100):
+    axes[0].plot(time, posi, label="Position", **kwargs)
+    axes[1].plot(time, vel, **kwargs)
+    axes[2].plot(time, acc, **kwargs)
+else:
+    axes[0].stem(time, posi, label="Position Entière")
+    axes[1].stem(time, vel)
+    axes[2].stem(time, acc)
 
-axes[2].plot(time, acc, marker='.')
+axes[0].plot(time, pos, label="Position")
 
-axes[2].set_ylabel("Acceleration [rev/s²]")
+axes[0].set_ylabel("Position [pu]")
+axes[1].set_ylabel("Velocity [pu/s]")
+axes[2].set_ylabel("Acceleration [pu/s²]")
 axes[2].set_xlabel("Time [s]")
 
-# axes[0].stem(time, pos, label="Position")
-# axes[0].stem(time, posj, label="Position2", linefmt='g-', markerfmt='go', basefmt='k-' )
-# axes[0].set_ylabel("Position [rev]")
-
-# axes[1].stem(time, vel)
-# axes[1].stem(time, velj, label="Position2", linefmt='g-', markerfmt='go', basefmt='k-' )
-# axes[1].set_ylabel("Velocity [rev/s]")
-
-# axes[2].stem(time, acc)
-# axes[2].stem(time, accj, label="Position2", linefmt='g-', markerfmt='go', basefmt='k-' )
-# axes[2].set_ylabel("Acceleration [rev/s²]")
-# axes[2].set_xlabel("Time [s]")
-
 for ax in axes:
-    ax.grid(True)
+    ax.grid(True, which='major', linestyle='-')
+    ax.minorticks_on()
+    ax.grid(True, which='minor', linestyle=':', linewidth=0.5, alpha=0.7)
 
 fig.tight_layout()
 plt.show()
