@@ -43,6 +43,24 @@ $$
 5. La vitesse doit être nulle à la fin de la trajectoire.
 6. Le mouvement doit pouvoir être changé à tout moment.
 
+## Unités
+
+La vitesse et l'accélération n'ayant pas besoin d'une précision absolue, sont exprimées en `float` (32-bits). L'unité par défaut par seconde. L'accélération également donnée en `float` (32-bits) est exprimée en unités par séfaut par secondes au carré, enfin le Jerk est exprimé en secondes.
+
+La position quant à elle est exprimée en format Q32.32, en unité par défaut.
+
+L'unité par défaut recommandée est le tour pour les moteurs rotatifs et le millimètre pour les moteurs linéaires. Grace à la position générique, il vous est possible d'adapter comme vous le souhaitez.
+
+Concernant le générateur de trajectoire, la variante prévue pour TMS320F28388D (FPU IEEE 64-bits), ne supporte qu'un mouvement maximum de 54 bits de résolution.
+
+Prenons l'exemple d'un moteur rotatif avec un codeur de 8192 par par tour. Avec l'interpolation on peut obtenir :
+
+$$
+8192 \cdot 4 * 2^{12} = 134217728 pas par tour
+$$
+
+Un mouvement de 100 tours représente donc : 33 bits... C'est honnête.
+
 ## Installation
 
 ```bash
